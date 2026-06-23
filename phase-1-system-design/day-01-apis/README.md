@@ -1,70 +1,67 @@
 # Day 1 — APIs: REST vs GraphQL vs gRPC
 
-> **AESP Context:** The API Gateway layer serves three different client types — each with different needs. Choosing the right protocol for each is the first real design decision in AESP.
+> Learning approach: **Analogy first → Concept → Java code → Node.js code → Interview Q&A**
+> AESP context: The gateway layer serves three client types. Picking the right protocol per client is the first real design decision.
 
 ---
 
-## Mental model
+## The restaurant analogy
 
-Every system needs a **contract** between clients and servers. APIs are that contract. The question isn't "which is best" — it's "which fits this situation." Senior engineers choose protocols based on tradeoffs, not preference.
-
-AESP uses all three protocols because it has three different client types with three different needs.
-
-```
-AESP Gateway routing rule:
-  /graphql       →  GraphQL  (web dashboard, mobile app)
-  /api/v1/*      →  REST     (external developers, webhooks, email ingestion)
-  internal mesh  →  gRPC     (service-to-service, never exposed externally)
-```
+| Protocol | Analogy | When to use in AESP |
+|---|---|---|
+| REST | Fixed-menu waiter — order a named dish, get the whole dish | External devs, webhooks, email ingestion |
+| GraphQL | Build-your-own bowl (Chipotle) — specify exactly what you want | Web dashboard, mobile app |
+| gRPC | Kitchen walkie-talkie — chefs talking shorthand, fast and coded | Service-to-service internal calls |
 
 ---
 
-## REST — the foundation
+## REST — The fixed-menu waiter
 
-REST is the default for external APIs. Resources are nouns, HTTP verbs are actions.
+You walk into a restaurant, point at item 4 on the menu, and the waiter brings you the whole dish. You can't ask for just the sauce from item 4 and the chicken from item 7. That's REST — predefined resources, predefined responses.
 
+**Resources are nouns. HTTP verbs are actions.**
 ```
+GET    /api/v1/tickets          → read tickets
 POST   /api/v1/tickets          → create a ticket
-GET    /api/v1/tickets/:id      → get a ticket
 PATCH  /api/v1/tickets/:id      → update a ticket
 DELETE /api/v1/tickets/:id      → delete a ticket
-GET    /api/v1/tickets?status=open&cursor=xyz  → list with pagination
 ```
 
-### AESP implementation
+**The over-fetching problem:** When you order pasta, you get the whole plate. In REST, `GET /tickets/123` returns 30 fields even if your screen only needs 2. That's wasted bandwidth — especially painful on mobile.
+
+### AESP implementation — Node.js (Express)
 
 ```javascript
-// POST /api/v1/tickets — create ticket with idempotency
-router.post('/tickets', authenticate, rateLimit, async (req, res) => {
+router.post('/tickets', authenticate, async (req, res) => {
   const { subject, description, priority } = req.body;
-  const tenantId = req.user.tenantId;
 
-  // Idempotency: if client retries, don't create duplicate
-  const existing = await redis.get(`idempotency:${req.headers['idempotency-key']}`);
-  if (existing) return res.status(200).json(JSON.parse(existing));
+  // Idempotency: like a receipt number — submit twice, get same ticket back
+  const key = req.headers['idempotency-key'];
+  const cached = await redis.get(`idem:${key}`);
+  if (cached) return res.status(200).json(JSON.parse(cached));
 
   const ticket = await db.tickets.create({
     subject, description,
-    priority: priority || 'medium',
-    tenantId, status: 'open'
+    priority: priority || 'MEDIUM',
+    tenantId: req.user.tenantId,
+    status: 'OPEN'
   });
 
-  await redis.setex(`idempotency:${req.headers['idempotency-key']}`, 86400, JSON.stringify(ticket));
-  await kafka.publish('ticket.created', { ticketId: ticket.id, tenantId });
+  await redis.setex(`idem:${key}`, 86400, JSON.stringify(ticket));
+  await kafka.publish('ticket.created', { ticketId: ticket.id });
 
   return res.status(201).json({ data: ticket });
 });
 
-// GET /api/v1/tickets — cursor-based pagination (never offset)
+// Cursor pagination — NOT page numbers
 router.get('/tickets', authenticate, async (req, res) => {
-  const { cursor, limit = 20, status } = req.query;
+  const { cursor, limit = 20 } = req.query;
 
+  // cursor = "give me everything after this ticket ID"
+  // Safe when new tickets are inserted — unlike page numbers
   const tickets = await db.tickets.findMany({
-    where: {
-      tenantId: req.user.tenantId,
-      ...(status && { status }),
-      ...(cursor && { id: { gt: cursor } })
-    },
+    where: { tenantId: req.user.tenantId,
+             ...(cursor && { id: { gt: cursor } }) },
     take: Number(limit) + 1,
     orderBy: { createdAt: 'desc' }
   });
@@ -72,187 +69,304 @@ router.get('/tickets', authenticate, async (req, res) => {
   const hasMore = tickets.length > Number(limit);
   if (hasMore) tickets.pop();
 
-  return res.json({
-    data: tickets,
-    pagination: {
-      nextCursor: hasMore ? tickets[tickets.length - 1].id : null,
-      hasMore
-    }
-  });
+  res.json({ data: tickets,
+             pagination: { nextCursor: hasMore ? tickets.at(-1).id : null } });
 });
 ```
 
-### Three concepts senior engineers are judged on
+### AESP implementation — Java (Spring Boot)
 
-**1. Idempotency keys**
-Networks are unreliable. A client POSTs a ticket, the network drops before the response. Client retries. Without idempotency, you get a duplicate ticket. With it, the second request returns the same ticket created the first time.
-- Client sends: `Idempotency-Key: <uuid-v4>` header
-- Server stores result in Redis with that key for 24h
-- On retry, return cached result without touching the DB
+```java
+@RestController
+@RequestMapping("/api/v1/tickets")
+public class TicketController {
 
-**2. Cursor vs offset pagination**
-`?page=2&limit=20` breaks when rows are inserted mid-pagination — you skip or repeat items. Cursor pagination (`?cursor=last_seen_id`) says "give me everything after this point" — insertion-safe and fast because it uses the primary key index.
+    @PostMapping
+    public ResponseEntity<TicketResponse> createTicket(
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @RequestBody CreateTicketRequest request,
+            @AuthenticationPrincipal UserDetails user) {
 
-**3. API versioning**
-Always version from day one: `/api/v1/`. When you need a breaking change, release `/api/v2/` and sunset v1 with 6 months' advance notice. Never silently break existing callers.
+        // Idempotency check
+        String cached = redisTemplate.opsForValue().get("idem:" + idempotencyKey);
+        if (cached != null) {
+            return ResponseEntity.ok(objectMapper.readValue(cached, TicketResponse.class));
+        }
 
-**HTTP status codes to know:**
-`200 OK` · `201 Created` · `400 Bad Request` · `401 Unauthorized` · `403 Forbidden` · `404 Not Found` · `409 Conflict` · `422 Unprocessable Entity` · `429 Too Many Requests` · `500 Internal Server Error`
+        Ticket ticket = ticketService.create(request, user.getTenantId());
 
----
+        redisTemplate.opsForValue().set(
+            "idem:" + idempotencyKey,
+            objectMapper.writeValueAsString(ticket),
+            Duration.ofHours(24)
+        );
+        kafkaTemplate.send("ticket.created", new TicketCreatedEvent(ticket.getId()));
 
-## GraphQL — flexible queries for complex UIs
+        return ResponseEntity.status(HttpStatus.CREATED).body(new TicketResponse(ticket));
+    }
 
-The AESP dashboard shows a ticket + assigned agent + AI resolution + comments on one screen. With REST, that's 4+ round trips. With GraphQL, one query fetches exactly what the screen needs.
+    @GetMapping
+    public ResponseEntity<PagedResponse<TicketResponse>> getTickets(
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @AuthenticationPrincipal UserDetails user) {
 
-### AESP schema
+        Specification<Ticket> spec = TicketSpec.byTenant(user.getTenantId())
+            .and(cursor != null ? TicketSpec.afterCursor(cursor) : null);
 
-```graphql
-type Ticket {
-  id: ID!
-  subject: String!
-  status: TicketStatus!
-  priority: Priority!
-  assignedAgent: Agent
-  aiResolution: AIResolution
-  comments(last: Int): [Comment!]!
-  customer: Customer
-}
+        List<Ticket> tickets = ticketRepository.findAll(spec,
+            PageRequest.of(0, limit + 1, Sort.by("createdAt").descending()));
 
-type Query {
-  ticket(id: ID!): Ticket
-  tickets(filter: TicketFilter, cursor: String, limit: Int): TicketConnection!
-}
+        boolean hasMore = tickets.size() > limit;
+        if (hasMore) tickets.remove(tickets.size() - 1);
+        String nextCursor = hasMore ? tickets.get(tickets.size() - 1).getId() : null;
 
-type Subscription {
-  ticketUpdated(id: ID!): Ticket!  # real-time via WebSocket
+        return ResponseEntity.ok(new PagedResponse<>(tickets, nextCursor));
+    }
 }
 ```
 
-### The N+1 problem and DataLoader
+**Three REST rules senior engineers apply without thinking:**
+1. Idempotency keys on every POST — clients always retry
+2. Cursor pagination, never offset — offset breaks on insertion
+3. Version from day one (`/v1/`) — never silently break callers
+
+---
+
+## GraphQL — The build-your-own bowl
+
+At Chipotle, you walk down the line: "rice — yes, beans — no, extra guac, no onions." You get exactly what you asked for. No more, no less. That's GraphQL — the client defines the exact shape of the response.
+
+**The N+1 problem — the inefficient waiter:**
+A waiter takes orders from 100 people. He brings one plate, goes back, brings another plate, goes back 100 times. Catastrophically slow. That's what a naive GraphQL resolver does — makes 100 DB queries to fetch the agent for each of 100 tickets.
+
+**DataLoader is the fix — collect all orders, make one trip:**
+
+### Node.js (Apollo Server)
 
 ```javascript
+// Schema — the menu of fields clients can ask for
+const typeDefs = `
+  type Ticket {
+    id: ID!
+    subject: String!
+    status: String!
+    assignedAgent: Agent      # causes N+1 without DataLoader
+    comments(last: Int): [Comment!]!
+  }
+  type Query {
+    ticket(id: ID!): Ticket
+    tickets(cursor: String, limit: Int): TicketConnection!
+  }
+  type Subscription {
+    ticketUpdated(id: ID!): Ticket!   # WebSocket real-time updates
+  }
+`;
+
 const resolvers = {
   Ticket: {
-    // NAIVE — N+1: 100 tickets = 100 separate agent DB queries
-    assignedAgent_NAIVE: async (ticket) => {
-      return db.agents.findById(ticket.agentId);  // called once per ticket!
-    },
+    // WRONG — N+1: 100 tickets = 100 DB queries
+    assignedAgent_WRONG: async (ticket) => db.agents.findById(ticket.agentId),
 
-    // CORRECT — DataLoader batches all agent IDs into ONE query
+    // RIGHT — DataLoader batches all into ONE query
     assignedAgent: async (ticket, _, { loaders }) => {
-      return loaders.agent.load(ticket.agentId);  // batched + cached
+      return loaders.agentLoader.load(ticket.agentId);
     }
   }
 };
 
-// DataLoader: collects all .load(id) calls in one event loop tick
-// then fires a single SELECT * FROM agents WHERE id IN (...)
+// DataLoader — the "batch tray" mechanism
 const agentLoader = new DataLoader(async (agentIds) => {
-  const agents = await db.agents.findMany({
-    where: { id: { in: agentIds } }
-  });
+  // Runs ONCE with all collected IDs: SELECT * FROM agents WHERE id IN (...)
+  const agents = await db.agents.findMany({ where: { id: { in: agentIds } } });
   return agentIds.map(id => agents.find(a => a.id === id));
 });
 ```
 
-**Rule:** Every GraphQL field that queries the DB by a foreign key MUST use DataLoader. No exceptions.
+### Java (Netflix DGS framework)
+
+```java
+@DgsComponent
+public class TicketDataFetcher {
+
+    @DgsQuery
+    public Ticket ticket(@InputArgument String id) {
+        return ticketService.findById(id);
+    }
+
+    // BatchLoader — Java's DataLoader equivalent
+    @DgsDataLoader(name = "agents")
+    public BatchLoader<String, Agent> agentBatchLoader() {
+        return agentIds -> CompletableFuture.supplyAsync(() -> {
+            // Single DB query for all agent IDs
+            Map<String, Agent> agentMap = agentRepository
+                .findAllById(agentIds).stream()
+                .collect(Collectors.toMap(Agent::getId, a -> a));
+            return agentIds.stream().map(agentMap::get).collect(Collectors.toList());
+        });
+    }
+
+    // Field resolver uses the batch loader — not a direct DB call
+    @DgsData(parentType = "Ticket", field = "assignedAgent")
+    public CompletableFuture<Agent> assignedAgent(DgsDataFetchingEnvironment env) {
+        Ticket ticket = env.getSource();
+        DataLoader<String, Agent> loader = env.getDataLoader("agents");
+        return loader.load(ticket.getAgentId());   // batched automatically
+    }
+}
+```
+
+**Rule: Every GraphQL field that queries DB by foreign key MUST use DataLoader. No exceptions.**
 
 ---
 
-## gRPC — internal service communication
+## gRPC — The kitchen walkie-talkie
 
-Between AESP microservices, REST's JSON overhead adds up at scale. gRPC uses Protocol Buffers (binary): ~5x smaller payload, no string parsing, typed contract enforced at compile time.
+Two chefs use shorthand: "86 the salmon, re-fire on table 5." Fast, coded, only works if both know the system. That's gRPC — microservices talking binary shorthand defined in a shared `.proto` file.
 
-### AESP proto definition
+**Why binary?** JSON `{"status": "RESOLVED"}` is 20 bytes as text. The same message in Protocol Buffers binary is ~4 bytes. At 10M tickets/day, that matters.
+
+### The proto file — the shared codebook
 
 ```protobuf
 syntax = "proto3";
 
 service TicketService {
-  rpc CreateTicket(CreateTicketRequest) returns (TicketResponse);
   rpc UpdateStatus(UpdateStatusRequest) returns (TicketResponse);
-  // AI agent streams real-time resolution steps
   rpc StreamResolutionProgress(TicketId) returns (stream ResolutionEvent);
 }
 
-message CreateTicketRequest {
-  string subject     = 1;
-  string description = 2;
-  string tenant_id   = 3;
-  Priority priority  = 4;
+message UpdateStatusRequest {
+  string ticket_id   = 1;
+  string status      = 2;
+  string resolution  = 3;
+  string resolved_by = 4;
 }
 
-enum Priority {
-  MEDIUM = 0;
-  HIGH   = 1;
-  P1     = 2;
+message ResolutionEvent {
+  string step       = 1;
+  float  confidence = 2;
+  bool   is_final   = 3;
 }
 ```
 
-```javascript
-// AI Orchestration Service → Ticket Service via gRPC
-const ticketClient = new TicketServiceClient('ticket-service:50051', credentials);
+### Node.js gRPC client (AI Service → Ticket Service)
 
-ticketClient.updateStatus({
-  ticketId: ticket.id,
+```javascript
+const client = new TicketServiceClient(
+  'ticket-service:50051',           // internal DNS only — never exposed externally
+  grpc.credentials.createInsecure() // mTLS in production via Istio service mesh
+);
+
+// Simple call — AI resolver marking ticket resolved
+client.updateStatus({
+  ticketId: 'tkt_abc123',
   status: 'RESOLVED',
-  resolution: aiResponse,
-  resolvedBy: 'ai-resolver-agent'
+  resolution: 'Refund will be processed in 3-5 business days.',
+  resolvedBy: 'ai-resolver-agent-v2'
 }, (err, response) => {
   if (err) throw err;
-  console.log('Ticket resolved:', response.id);
+  console.log('Resolved:', response.status);
+});
+
+// Streaming call — AI agent streams progress steps live
+const stream = client.streamResolutionProgress({ ticketId: 'tkt_abc123' });
+stream.on('data', (event) => {
+  console.log(`Step: ${event.step} | Confidence: ${event.confidence}`);
+  if (event.isFinal) console.log('Resolution complete');
 });
 ```
 
-**Important:** gRPC is internal only. Browsers can't speak HTTP/2 gRPC framing natively — never expose gRPC directly to clients.
+### Java gRPC server (Ticket Service implementing the contract)
+
+```java
+@GrpcService
+public class TicketGrpcService extends TicketServiceGrpc.TicketServiceImplBase {
+
+    @Override
+    public void updateStatus(UpdateStatusRequest request,
+                             StreamObserver<TicketResponse> responseObserver) {
+        Ticket ticket = ticketService.updateStatus(
+            request.getTicketId(), request.getStatus(),
+            request.getResolution(), request.getResolvedBy()
+        );
+
+        responseObserver.onNext(TicketResponse.newBuilder()
+            .setId(ticket.getId())
+            .setStatus(ticket.getStatus().name())
+            .build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void streamResolutionProgress(TicketId request,
+                                         StreamObserver<ResolutionEvent> stream) {
+        List<String> steps = aiService.getResolutionSteps(request.getTicketId());
+        for (int i = 0; i < steps.size(); i++) {
+            stream.onNext(ResolutionEvent.newBuilder()
+                .setStep(steps.get(i))
+                .setConfidence(0.91f)
+                .setIsFinal(i == steps.size() - 1)
+                .build());
+        }
+        stream.onCompleted();
+    }
+}
+```
+
+**Important:** gRPC is internal only in AESP. mTLS handled by Istio service mesh — no manual cert management in application code.
 
 ---
 
-## Decision matrix
+## Decision rule — one question at a time
 
-| Situation | Use |
-|---|---|
-| External API for third-party developers | REST |
-| Web/mobile dashboard with multi-entity data | GraphQL |
-| Internal service → service calls | gRPC |
-| Real-time updates (WebSocket) | GraphQL Subscriptions |
-| Webhooks / callbacks | REST (POST) |
-| Latency < 5ms between services | gRPC |
-| You control only one side (consumer) | REST |
-| Both sides are your code | gRPC |
+```
+Is it service-to-service (internal)?
+  YES → gRPC (fast, typed, binary)
+  NO (client-facing) →
+    Does the client need flexible/complex queries?
+      YES → GraphQL (dashboard, mobile)
+      NO  → REST (webhooks, external devs, simple integrations)
 
----
-
-## Interview questions
-
-**"Design the API for a support ticketing system"**
-Answer: REST for external developer integrations (/api/v1/tickets), GraphQL for the dashboard (complex multi-entity queries), gRPC for internal microservice calls. Walk through the ticket resource design with HTTP verbs, pagination strategy (cursor-based), versioning, and auth (JWT).
-
-**"What is the N+1 problem in GraphQL?"**
-For N parent objects, a naive resolver makes N child queries. 100 tickets × 1 agent lookup = 101 DB queries. Fix with DataLoader: batches all child lookups within the same event loop tick into a single `SELECT ... WHERE id IN (...)`.
-
-**"When would you NOT use GraphQL?"**
-- Simple APIs with few entity types — REST is simpler
-- Public APIs where CDN caching matters (REST has better HTTP cache semantics)
-- Teams new to it (schema design and DataLoader have a learning curve)
-
-**"What is idempotency and why does it matter?"**
-Same request, same result, regardless of how many times it's called. Critical for POST because clients retry on network failures. Implement: client sends a unique UUID header, server stores result keyed to that UUID, returns cached result on retry.
-
-**"What's the difference between authentication and authorization?"**
-Auth**entication** = who are you? (JWT, OAuth2 token)
-Auth**orization** = what can you do? (RBAC, tenant isolation checks)
-Both happen in the API gateway before the request reaches any service.
+Bonus: Need real-time live updates?
+  → GraphQL Subscriptions (WebSocket)
+```
 
 ---
 
-## Key takeaways
+## HTTP status codes — know these cold
 
-1. REST = external APIs. Universal, simple, HTTP-native, great CDN caching.
-2. GraphQL = complex UI queries. One request for many entities. Watch for N+1 — always DataLoader.
-3. gRPC = internal services. Binary, fast, typed. Never expose to browsers.
-4. Always version APIs from day one. Always use cursor pagination. Always add idempotency keys on write endpoints.
+| Code | Meaning | When to use |
+|---|---|---|
+| 200 | OK | GET, PATCH success |
+| 201 | Created | POST created a resource |
+| 400 | Bad Request | Invalid input from client |
+| 401 | Unauthorized | No/invalid auth token |
+| 403 | Forbidden | Authenticated but not allowed |
+| 404 | Not Found | Resource doesn't exist |
+| 409 | Conflict | Duplicate / state conflict |
+| 422 | Unprocessable | Valid format, invalid semantics |
+| 429 | Too Many Requests | Rate limit exceeded |
+| 500 | Internal Server Error | Something broke on our side |
+
+---
+
+## Interview Q&A
+
+**Q: REST vs GraphQL — when to use each?**
+REST = fixed menu (good for simple external APIs, CDN caching). GraphQL = custom order (good when UI needs data from multiple entities in one request). In AESP: REST for external developers, GraphQL for the dashboard that needs ticket + agent + AI summary + comments in one query.
+
+**Q: What is the N+1 problem?**
+Fetch 100 tickets → naive resolver makes 100 separate agent queries = 101 DB queries total. Fix: DataLoader collects all agent IDs in one event loop tick, fires one `SELECT ... WHERE id IN (...)`. In Java: `BatchLoader` with DGS. In Node.js: `dataloader` package.
+
+**Q: When would you choose gRPC?**
+Internal microservice calls where both sides are under your control and performance matters. Binary Protocol Buffers = 5–10x smaller than JSON. Strongly typed contract via `.proto` — compile-time errors instead of runtime surprises. Never expose gRPC to browsers — they can't speak HTTP/2 gRPC framing natively.
+
+**Q: What is idempotency? Why does it matter?**
+Same request → same result, no matter how many times called. Networks are unreliable — clients retry. Without idempotency on POST, a user submitting a ticket on a flaky network could create 3 tickets. Fix: client sends unique UUID as `Idempotency-Key` header, server caches result against that key, returns cached result on retry.
+
+**Q: Cursor vs offset pagination?**
+Offset pagination (`page=2`) breaks when rows are inserted between requests — you skip or repeat items. Cursor pagination (`cursor=last_id`) is a bookmark — "give me everything after this point." Insertion-safe and fast because it uses the primary key index. Always use cursor for production APIs.
 
 ---
 
