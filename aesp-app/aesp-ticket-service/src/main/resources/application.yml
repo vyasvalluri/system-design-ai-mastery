@@ -1,0 +1,58 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: aesp-ticket-service
+
+  # Day 4: primary write store. In production this is sharded by tenant_id at the
+  # infra/proxy layer (e.g. Citus, or app-level routing DataSource) - a single
+  # datasource is used here to keep the reference implementation runnable, with the
+  # sharding-relevant index (tenant_id, created_at) applied regardless (see
+  # V1__create_tickets_table.sql).
+  datasource:
+    url: jdbc:postgresql://localhost:5432/aesp
+    username: aesp
+    password: aesp
+    hikari:
+      maximum-pool-size: 20
+
+  jpa:
+    hibernate:
+      ddl-auto: validate   # schema owned by Flyway/manual migration, not Hibernate auto-DDL
+    properties:
+      hibernate:
+        format_sql: true
+    open-in-view: false     # avoid the classic N+1-in-the-view-layer footgun
+
+  # Day 3: cache-aside for ticket reads. Short TTL because ticket status changes
+  # frequently and staleness beyond a few seconds is not acceptable for agent-facing reads.
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  cache:
+    type: redis
+    redis:
+      time-to-live: 30s
+
+  # Day 5: async decoupling of ingestion from AI enrichment / analytics.
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all              # durability over raw throughput - a lost ticket event is not acceptable
+
+aesp:
+  topics:
+    ticket-created: ticket.created
+    ticket-status-changed: ticket.status-changed
+  idempotency:
+    ttl-seconds: 86400        # Day 8: dedup window for retried channel deliveries (e.g. email retries)
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus

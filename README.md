@@ -111,6 +111,8 @@ system-design-ai-mastery/
 |---|---|---|
 | Phase 1 — System Design | 🔄 In Progress | 0 / 8 |
 | Phase 2 — AI + RAG | ✅ Complete | 8 / 8 |
+
+**Reference implementation**: [`aesp-app/`](./aesp-app) — real, buildable Spring Boot code for Phase 1 (Days 1–8). Phase 2's AI/RAG service is in progress. See `aesp-app/README.md` for the module-to-day mapping and how to run it.
 | Phase 3 — Agentic AI | ⏳ Upcoming | 0 / 6 |
 | Phase 4 — Scale & Observability | ⏳ Upcoming | 0 / 5 |
 | Phase 5 — Advanced | ⏳ Upcoming | 0 / 3 |

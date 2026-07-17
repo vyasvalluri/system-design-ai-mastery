@@ -1,0 +1,61 @@
+version: "3.8"
+
+# Local infra for running aesp-app end-to-end. Bring up with:
+#   docker compose up -d
+# Then run each Spring Boot module separately (mvn spring-boot:run in
+# aesp-ticket-service/ and aesp-gateway/) since they're independently
+# deployable services, not started by this compose file itself.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aesp-postgres
+    environment:
+      POSTGRES_DB: aesp
+      POSTGRES_USER: aesp
+      POSTGRES_PASSWORD: aesp
+    ports:
+      - "5432:5432"
+    volumes:
+      - aesp-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aesp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: aesp-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: aesp-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: aesp-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+volumes:
+  aesp-postgres-data:

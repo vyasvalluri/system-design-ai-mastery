@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.aesp</groupId>
+        <artifactId>aesp-app</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>aesp-events</artifactId>
+    <packaging>jar</packaging>
+    <name>aesp-events</name>
+    <description>
+        Shared event contracts published to Kafka and consumed across AESP services.
+        Curriculum: Day 5 (Message Queues + Event-Driven Architecture).
+        Kept as a separate module so producers and consumers never diverge on schema -
+        both aesp-ticket-service and any future AI worker modules depend on this jar
+        instead of hand-copying event classes.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+    </dependencies>
+</project>

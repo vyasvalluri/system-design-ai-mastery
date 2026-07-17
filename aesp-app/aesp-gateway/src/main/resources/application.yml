@@ -1,0 +1,38 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: aesp-gateway
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+  cloud:
+    gateway:
+      routes:
+        # Day 1: versioned path, routed to the ticket service. In a real
+        # multi-service deployment this list grows one route per service
+        # (RAG query service, agent-assist service, etc) behind the same edge.
+        - id: ticket-service
+          uri: http://localhost:8081
+          predicates:
+            - Path=/api/v1/tickets/**
+          filters:
+            # Day 2: token-bucket rate limiter, Redis-backed so it works
+            # correctly across multiple gateway instances (not an in-memory
+            # counter that would reset per-instance and defeat the point).
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 50   # sustained requests/sec per tenant
+                redis-rate-limiter.burstCapacity: 100   # short burst allowance above sustained rate
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@tenantKeyResolver}"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
