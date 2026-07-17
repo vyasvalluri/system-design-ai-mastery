@@ -110,7 +110,7 @@ system-design-ai-mastery/
 | Phase | Status | Days Completed |
 |---|---|---|
 | Phase 1 — System Design | 🔄 In Progress | 0 / 8 |
-| Phase 2 — AI + RAG | ⏳ Upcoming | 0 / 8 |
+| Phase 2 — AI + RAG | 🔄 In Progress | 6 / 8 |
 | Phase 3 — Agentic AI | ⏳ Upcoming | 0 / 6 |
 | Phase 4 — Scale & Observability | ⏳ Upcoming | 0 / 5 |
 | Phase 5 — Advanced | ⏳ Upcoming | 0 / 3 |
